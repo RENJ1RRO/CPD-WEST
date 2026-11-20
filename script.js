@@ -31,6 +31,7 @@ let activeStaffId = "";
 let db = null;
 let toastTimer = 0;
 let viewSig = "";
+const composerLock = new WeakSet();
 
 function loadIds() {
   try {
@@ -53,19 +54,70 @@ function stamp() {
 function timeValue(value) {
   if (!value) return 0;
   if (typeof value.toMillis === "function") return value.toMillis();
+  if (typeof value === "object" && typeof value.seconds === "number") {
+    return value.seconds * 1000 + Math.floor((value.nanoseconds || 0) / 1e6);
+  }
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? 0 : date.getTime();
 }
 
-function formatTime(value) {
+function formatClock(value) {
   const ms = timeValue(value);
   if (!ms) return "";
-  return new Intl.DateTimeFormat("ru-RU", {
-    day: "2-digit",
-    month: "2-digit",
+  const raw = new Date(ms).toLocaleTimeString("ru-RU", {
     hour: "2-digit",
     minute: "2-digit"
-  }).format(new Date(ms));
+  });
+  const match = String(raw).match(/(\d{1,2})\D(\d{2})/);
+  if (!match) return "";
+  return `${match[1].padStart(2, "0")}:${match[2]}`;
+}
+
+function dayKey(ms) {
+  const date = new Date(ms);
+  return `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
+}
+
+function formatDayChip(ms) {
+  const date = new Date(ms);
+  const now = new Date();
+  const sameDay = (left, right) => left.getFullYear() === right.getFullYear()
+    && left.getMonth() === right.getMonth()
+    && left.getDate() === right.getDate();
+  if (sameDay(date, now)) return "Сегодня";
+  const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+  if (sameDay(date, yesterday)) return "Вчера";
+  const day = String(date.getDate()).padStart(2, "0");
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  return `${day}.${month}.${date.getFullYear()}`;
+}
+
+function staffName(row) {
+  const keys = ["senderName", "staffName", "authorName", "displayName", "name", "author"];
+  for (let index = 0; index < keys.length; index += 1) {
+    const value = row[keys[index]];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return "Сотрудник ЦПД";
+}
+
+function deliveryTicks(row) {
+  const words = new Set(
+    ["deliveryStatus", "delivery", "readStatus", "messageStatus", "status"]
+      .map((key) => (typeof row[key] === "string" ? row[key].trim().toLowerCase() : ""))
+      .filter(Boolean)
+  );
+  const has = (...list) => list.some((word) => words.has(word));
+  if (row.read === true || row.seen === true || has("read", "seen", "прочитано", "прочитан", "прочитана")) {
+    return { marks: "✓✓", read: true };
+  }
+  if (row.delivered === true || has("delivered", "received", "получено", "доставлено", "доставлен", "доставлена")) {
+    return { marks: "✓✓", read: false };
+  }
+  if (row.sent === true || has("sent", "ok", "отправлено", "отправлен", "отправлена")) {
+    return { marks: "✓", read: false };
+  }
+  return null;
 }
 
 function shortId(id) {
@@ -245,27 +297,167 @@ function hideToast() {
   window.clearTimeout(toastTimer);
 }
 
-function fillLog(node, rows) {
-  const nearBottom = node.scrollHeight - node.scrollTop - node.clientHeight < 48;
+function bindLog(node) {
+  if (node._chatBound) return;
+  node._chatBound = true;
+  node.addEventListener("scroll", () => {
+    if (!node._chat || node._chat.pinning) return;
+    const gap = node.scrollHeight - node.scrollTop - node.clientHeight;
+    node._chat.userMoved = gap > 64;
+  }, { passive: true });
+  if (bindLog.listening) return;
+  bindLog.listening = true;
+  window.addEventListener("resize", () => {
+    document.querySelectorAll(".chat-log").forEach((log) => {
+      if (!log._chat || log._chat.userMoved) return;
+      log._chat.pinning = true;
+      log.scrollTop = log.scrollHeight;
+      log._chat.pinning = false;
+    });
+  });
+}
+
+function fillLog(node, rows, ticketId) {
+  bindLog(node);
+  const ticketKey = ticketId || "";
+  const state = node._chat || { ticketId: null, generation: 0, userMoved: false };
+  const opened = state.ticketId !== ticketKey;
+  const prevTop = node.scrollTop;
+  const prevMax = Math.max(0, node.scrollHeight - node.clientHeight);
+  const nearBottom = prevMax - prevTop < 64;
+  const generation = state.generation + 1;
+  const userMoved = opened ? false : Boolean(state.userMoved);
+  const source = Array.isArray(rows) ? rows : [];
+  const ordered = source
+    .filter((row) => row && typeof row === "object")
+    .slice()
+    .sort((a, b) => timeValue(a.timestamp) - timeValue(b.timestamp));
+
   node.replaceChildren();
-  if (!rows.length) {
+  if (!ordered.length) {
     const empty = document.createElement("p");
     empty.className = "empty-note";
     empty.textContent = "Сообщений пока нет.";
     node.append(empty);
+  } else {
+    let lastDay = "";
+    ordered.forEach((row, index) => {
+      const ms = timeValue(row.timestamp);
+      const side = row.sender === "staff" ? "staff" : "player";
+      if (ms) {
+        const key = dayKey(ms);
+        if (key !== lastDay) {
+          const chip = document.createElement("p");
+          chip.className = "chat-day";
+          chip.textContent = formatDayChip(ms);
+          node.append(chip);
+          lastDay = key;
+        }
+      }
+      const previous = ordered[index - 1];
+      const previousMs = previous ? timeValue(previous.timestamp) : 0;
+      const grouped = Boolean(previous)
+        && previous.sender === row.sender
+        && ms
+        && previousMs
+        && dayKey(ms) === dayKey(previousMs);
+      const item = document.createElement("article");
+      item.className = `msg msg--${side}${grouped ? " is-grouped" : ""}`;
+      if (side === "staff" && !grouped) {
+        const name = document.createElement("p");
+        name.className = "msg__name";
+        name.textContent = staffName(row);
+        item.append(name);
+      }
+      const bubble = document.createElement("p");
+      bubble.className = "msg__bubble";
+      bubble.textContent = row.text || "";
+      item.append(bubble);
+      const clock = ms ? formatClock(ms) : "";
+      const ticks = deliveryTicks(row);
+      if (clock || ticks) {
+        const meta = document.createElement("p");
+        meta.className = "msg__meta";
+        if (clock) {
+          const time = document.createElement("time");
+          time.dateTime = new Date(ms).toISOString();
+          time.textContent = clock;
+          meta.append(time);
+        }
+        if (ticks) {
+          const mark = document.createElement("span");
+          mark.className = ticks.read ? "msg__ticks is-read" : "msg__ticks";
+          mark.textContent = ticks.marks;
+          mark.setAttribute("aria-hidden", "true");
+          meta.append(mark);
+        }
+        item.append(meta);
+      }
+      node.append(item);
+    });
+  }
+
+  node._chat = { ticketId: ticketKey, generation, userMoved, pinning: false };
+  const nextMax = Math.max(0, node.scrollHeight - node.clientHeight);
+  const pinBottom = () => {
+    if (!node._chat || node._chat.generation !== generation || node._chat.userMoved) return;
+    node._chat.pinning = true;
+    node.scrollTop = node.scrollHeight;
+    node._chat.pinning = false;
+  };
+  if (opened) {
+    pinBottom();
+    window.requestAnimationFrame(pinBottom);
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(pinBottom, () => {});
     return;
   }
-  rows.forEach((row) => {
-    const bubble = document.createElement("article");
-    bubble.className = `bubble bubble--${row.sender === "staff" ? "staff" : "player"}`;
-    const text = document.createElement("p");
-    text.textContent = row.text || "";
-    const time = document.createElement("time");
-    time.textContent = row.sender === "staff" ? `Дежурный · ${formatTime(row.timestamp)}` : `Игрок · ${formatTime(row.timestamp)}`;
-    bubble.append(text, time);
-    node.append(bubble);
+  if (!nearBottom) {
+    node.scrollTop = Math.min(prevTop, nextMax);
+    return;
+  }
+  const delta = Math.max(0, nextMax - prevMax);
+  node.scrollTop = Math.max(0, nextMax - delta);
+  if (!motionOk || delta < 2) {
+    node.scrollTop = nextMax;
+    return;
+  }
+  window.requestAnimationFrame(() => {
+    if (!node._chat || node._chat.generation !== generation) return;
+    node.scrollTo({ top: node.scrollHeight, behavior: "smooth" });
   });
-  if (nearBottom) node.scrollTop = node.scrollHeight;
+}
+
+function fitComposer(input) {
+  const max = 128;
+  input.style.height = "auto";
+  const next = Math.min(input.scrollHeight, max);
+  input.style.height = `${Math.max(next, 44)}px`;
+  input.style.overflowY = input.scrollHeight > max ? "auto" : "hidden";
+}
+
+function bindComposers() {
+  document.querySelectorAll(".composer").forEach((form) => {
+    const input = form.querySelector("textarea");
+    if (!input) return;
+    input.addEventListener("input", () => fitComposer(input));
+    input.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" || event.shiftKey || event.isComposing || event.keyCode === 229) return;
+      event.preventDefault();
+      if (input.disabled || form.hidden) return;
+      form.requestSubmit();
+    });
+    fitComposer(input);
+  });
+}
+
+function setComposer(form, note, closed, canType) {
+  const input = form.querySelector("textarea");
+  const button = form.querySelector("button");
+  const locked = closed || !canType || composerLock.has(form);
+  form.hidden = Boolean(closed);
+  note.hidden = !closed;
+  input.disabled = locked;
+  button.disabled = locked;
 }
 
 function ticketButton(data, active) {
@@ -306,18 +498,15 @@ function renderCaseChat() {
   const status = document.querySelector("#case-status");
   const closed = document.querySelector("#case-closed");
   const form = document.querySelector("#case-form");
-  const input = document.querySelector("#case-input");
   const data = activeCaseId ? caseData.get(activeCaseId) : null;
 
   if (!activeCaseId || !data) {
     kicker.textContent = "Дело не выбрано";
     title.textContent = loadIds().length ? "Откройте заявку слева" : "Сначала подайте заявление";
     status.hidden = true;
-    closed.hidden = true;
     showEvidence(document.querySelector("#case-evidence"), "");
-    input.disabled = true;
-    form.querySelector("button").disabled = true;
-    fillLog(document.querySelector("#case-log"), []);
+    setComposer(form, closed, false, false);
+    fillLog(document.querySelector("#case-log"), [], "");
     return;
   }
 
@@ -328,10 +517,8 @@ function renderCaseChat() {
   status.hidden = false;
   status.textContent = isClosed ? "Закрыта" : "Открыта";
   status.className = `status-pill ${isClosed ? "is-closed" : "is-open"}`;
-  closed.hidden = !isClosed;
-  input.disabled = isClosed;
-  form.querySelector("button").disabled = isClosed;
-  fillLog(document.querySelector("#case-log"), caseMessages.get(activeCaseId) || []);
+  setComposer(form, closed, isClosed, true);
+  fillLog(document.querySelector("#case-log"), caseMessages.get(activeCaseId) || [], activeCaseId);
 }
 
 function selectCase(id) {
@@ -573,10 +760,12 @@ function setupForm() {
 
   document.querySelector("#case-form").addEventListener("submit", async (event) => {
     event.preventDefault();
+    const form = event.currentTarget;
     const input = document.querySelector("#case-input");
     const text = input.value.trim();
     const data = caseData.get(activeCaseId);
     if (!text || !activeCaseId || !data || data.status === "closed" || !db) return;
+    composerLock.add(form);
     input.disabled = true;
     try {
       await withTimeout(addMessage(activeCaseId, "player", text));
@@ -584,8 +773,12 @@ function setupForm() {
     } catch (error) {
       setDbStatus(humanError(error), false);
     } finally {
-      input.disabled = data.status === "closed";
-      input.focus();
+      composerLock.delete(form);
+      const current = caseData.get(activeCaseId);
+      const locked = !current || current.status === "closed";
+      input.disabled = locked;
+      fitComposer(input);
+      if (!locked) input.focus();
     }
   });
 }
@@ -618,18 +811,15 @@ function renderDeskChat() {
   const closeButton = document.querySelector("#desk-close-ticket");
   const closed = document.querySelector("#desk-closed");
   const form = document.querySelector("#desk-form");
-  const input = document.querySelector("#desk-input");
   const data = staffTickets.find((item) => item.id === activeStaffId);
 
   if (!data) {
     kicker.textContent = "Заявка не выбрана";
     title.textContent = "Выберите дело из списка";
     closeButton.hidden = true;
-    closed.hidden = true;
     showEvidence(document.querySelector("#desk-evidence"), "");
-    input.disabled = true;
-    form.querySelector("button").disabled = true;
-    fillLog(document.querySelector("#desk-log"), []);
+    setComposer(form, closed, false, false);
+    fillLog(document.querySelector("#desk-log"), [], "");
     return;
   }
 
@@ -638,10 +828,8 @@ function renderDeskChat() {
   title.textContent = data.playerName || "Заявление";
   showEvidence(document.querySelector("#desk-evidence"), data.evidence);
   closeButton.hidden = isClosed;
-  closed.hidden = !isClosed;
-  input.disabled = isClosed;
-  form.querySelector("button").disabled = isClosed;
-  fillLog(document.querySelector("#desk-log"), staffMessages);
+  setComposer(form, closed, isClosed, true);
+  fillLog(document.querySelector("#desk-log"), staffMessages, data.id);
 }
 
 function selectStaff(id) {
@@ -726,10 +914,12 @@ function setupAuth() {
 
   document.querySelector("#desk-form").addEventListener("submit", async (event) => {
     event.preventDefault();
+    const form = event.currentTarget;
     const input = document.querySelector("#desk-input");
     const text = input.value.trim();
     const data = staffTickets.find((item) => item.id === activeStaffId);
     if (!text || !activeStaffId || !data || data.status === "closed" || !db) return;
+    composerLock.add(form);
     input.disabled = true;
     try {
       await withTimeout(addMessage(activeStaffId, "staff", text));
@@ -737,8 +927,12 @@ function setupAuth() {
     } catch (error) {
       setDbStatus(humanError(error), false);
     } finally {
-      input.disabled = false;
-      input.focus();
+      composerLock.delete(form);
+      const current = staffTickets.find((item) => item.id === activeStaffId);
+      const locked = !current || current.status === "closed";
+      input.disabled = locked;
+      fitComposer(input);
+      if (!locked) input.focus();
     }
   });
 }
@@ -853,6 +1047,7 @@ setupReveal();
 setupClock();
 setupForm();
 setupAuth();
+bindComposers();
 bootCloud();
 renderCaseList();
 renderCaseChat();
