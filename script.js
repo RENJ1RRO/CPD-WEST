@@ -51,17 +51,22 @@ function stamp() {
   return Date.now();
 }
 
+function serverTimestamp() {
+  return firebase.database.ServerValue.TIMESTAMP;
+}
+
 function timeValue(value) {
   if (!value) return 0;
   if (typeof value.toMillis === "function") return value.toMillis();
   if (typeof value === "object" && typeof value.seconds === "number") {
     return value.seconds * 1000 + Math.floor((value.nanoseconds || 0) / 1e6);
   }
+  if (typeof value === "object" && value[".sv"] === "timestamp") return Date.now();
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? 0 : date.getTime();
 }
 
-function formatClock(value) {
+function formatTime(value) {
   const ms = timeValue(value);
   if (!ms) return "";
   const raw = new Date(ms).toLocaleTimeString("ru-RU", {
@@ -341,9 +346,9 @@ function fillLog(node, rows, ticketId) {
     node.append(empty);
   } else {
     let lastDay = "";
-    ordered.forEach((row, index) => {
-      const ms = timeValue(row.timestamp);
-      const side = row.sender === "staff" ? "staff" : "player";
+    ordered.forEach((msg, index) => {
+      const ms = timeValue(msg.timestamp);
+      const side = msg.sender === "staff" ? "staff" : "player";
       if (ms) {
         const key = dayKey(ms);
         if (key !== lastDay) {
@@ -357,7 +362,7 @@ function fillLog(node, rows, ticketId) {
       const previous = ordered[index - 1];
       const previousMs = previous ? timeValue(previous.timestamp) : 0;
       const grouped = Boolean(previous)
-        && previous.sender === row.sender
+        && previous.sender === msg.sender
         && ms
         && previousMs
         && dayKey(ms) === dayKey(previousMs);
@@ -366,15 +371,15 @@ function fillLog(node, rows, ticketId) {
       if (side === "staff" && !grouped) {
         const name = document.createElement("p");
         name.className = "msg__name";
-        name.textContent = staffName(row);
+        name.textContent = staffName(msg);
         item.append(name);
       }
       const bubble = document.createElement("p");
       bubble.className = "msg__bubble";
-      bubble.textContent = row.text || "";
+      bubble.textContent = msg.text || "";
       item.append(bubble);
-      const clock = ms ? formatClock(ms) : "";
-      const ticks = deliveryTicks(row);
+      const clock = formatTime(msg.timestamp);
+      const ticks = deliveryTicks(msg);
       if (clock || ticks) {
         const meta = document.createElement("p");
         meta.className = "msg__meta";
@@ -431,21 +436,24 @@ function fitComposer(input) {
   const max = 128;
   input.style.height = "auto";
   const next = Math.min(input.scrollHeight, max);
-  input.style.height = `${Math.max(next, 44)}px`;
+  input.style.height = `${Math.max(next, 46)}px`;
   input.style.overflowY = input.scrollHeight > max ? "auto" : "hidden";
 }
 
+function bindEnterToSend(input) {
+  input.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" || event.shiftKey || event.isComposing || event.keyCode === 229) return;
+    event.preventDefault();
+    const form = input.closest("form");
+    if (!form || input.disabled || form.hidden) return;
+    form.requestSubmit();
+  });
+}
+
 function bindComposers() {
-  document.querySelectorAll(".composer").forEach((form) => {
-    const input = form.querySelector("textarea");
-    if (!input) return;
+  document.querySelectorAll("#chat-input, #desk-input").forEach((input) => {
     input.addEventListener("input", () => fitComposer(input));
-    input.addEventListener("keydown", (event) => {
-      if (event.key !== "Enter" || event.shiftKey || event.isComposing || event.keyCode === 229) return;
-      event.preventDefault();
-      if (input.disabled || form.hidden) return;
-      form.requestSubmit();
-    });
+    bindEnterToSend(input);
     fitComposer(input);
   });
 }
@@ -653,7 +661,7 @@ async function createTicket(playerName, evidence, description) {
     status: "open",
     createdAt: now,
     messages: {
-      intro: { sender: "player", text: description, timestamp: now }
+      intro: { sender: "player", text: description, timestamp: serverTimestamp() }
     }
   });
   return id;
@@ -665,7 +673,7 @@ async function addMessage(ticketId, sender, text) {
   await ticketsRef().child(ticketId).child("messages").push({
     sender,
     text,
-    timestamp: stamp()
+    timestamp: serverTimestamp()
   });
 }
 
@@ -677,7 +685,7 @@ async function closeTicket(ticketId) {
   updates[`tickets/${ticketId}/messages/closed`] = {
     sender: "staff",
     text: "Заявка закрыта дежурным.",
-    timestamp: now
+    timestamp: serverTimestamp()
   };
   await db.ref().update(updates);
 }
@@ -761,7 +769,7 @@ function setupForm() {
   document.querySelector("#case-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = event.currentTarget;
-    const input = document.querySelector("#case-input");
+    const input = document.querySelector("#chat-input");
     const text = input.value.trim();
     const data = caseData.get(activeCaseId);
     if (!text || !activeCaseId || !data || data.status === "closed" || !db) return;

@@ -1419,14 +1419,14 @@ input[type="number"] {
   color: #7ee7ff;
 }
 
-.composer-bar {
+.chat-input-area {
   position: relative;
   flex: none;
   padding: 10px;
   background: rgba(8, 8, 10, 0.9);
 }
 
-.composer-bar::before {
+.chat-input-area::before {
   content: "";
   position: absolute;
   left: 0;
@@ -1453,11 +1453,12 @@ input[type="number"] {
   gap: 8px;
 }
 
-.composer textarea {
+#chat-input,
+#desk-input {
   flex: 1;
   min-width: 0;
   max-height: 128px;
-  min-height: 44px;
+  min-height: 46px;
   resize: none;
   overflow-y: hidden;
   padding: 10px 14px;
@@ -1469,40 +1470,42 @@ input[type="number"] {
   line-height: 1.4;
 }
 
-.composer textarea::placeholder {
+#chat-input::placeholder,
+#desk-input::placeholder {
   color: #9a9aa6;
 }
 
-.composer textarea:focus {
+#chat-input:focus,
+#desk-input:focus {
   outline: none;
   border-color: rgba(0, 240, 255, 0.8);
   box-shadow: 0 0 0 3px rgba(0, 240, 255, 0.16);
 }
 
-.composer__send {
-  flex: none;
-  width: 44px;
-  height: 44px;
+.send-btn {
+  flex-shrink: 0;
+  width: 46px;
+  height: 46px;
   display: grid;
   place-items: center;
   border: 0;
-  border-radius: 50%;
-  color: #fff;
-  background: linear-gradient(135deg, #2563eb, #6d28d9);
-  box-shadow: 0 8px 18px rgba(88, 28, 235, 0.28);
+  border-radius: 8px;
+  color: #041318;
+  background: linear-gradient(135deg, #00f0ff, #8a2be2);
 }
 
-.composer__send svg {
-  width: 18px;
-  height: 18px;
+.send-btn svg {
+  width: 20px;
+  height: 20px;
 }
 
-.composer__send:hover:not(:disabled) {
-  transform: translateY(-1px);
+.send-btn:hover:not(:disabled) {
+  box-shadow: 0 0 16px rgba(0, 240, 255, 0.7), 0 0 28px rgba(138, 43, 226, 0.55);
 }
 
-.composer__send:disabled,
-.composer textarea:disabled {
+.send-btn:disabled,
+#chat-input:disabled,
+#desk-input:disabled {
   cursor: not-allowed;
   opacity: 0.45;
 }
